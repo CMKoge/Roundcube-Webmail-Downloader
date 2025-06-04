@@ -473,64 +473,117 @@ def main():
         if not downloader.connect(username, password):
             return
         
-        # Check for existing progress before asking for folder
-        downloader.create_directories()  # Create directories first
-        resume_mode, processed_ids = downloader.check_resume_option()
+        # Create directories first
+        downloader.create_directories()
         
-        # Set resume state
-        downloader.resume_mode = resume_mode
-        downloader.processed_ids = processed_ids
-        
-        if resume_mode:
-            # Load progress to get the folder
-            progress = downloader.load_progress()
-            if progress:
-                folder = progress.get('folder', 'INBOX')
-                print(f"Resuming download from folder: {folder}")
-            else:
-                print("Could not load progress details, please select folder manually.")
-                resume_mode = False
-                downloader.resume_mode = False
-        
-        if not resume_mode:
-            # List available folders
-            print("\nChecking available folders...")
-            available_folders = downloader.list_folders()
-            
-            # Choose folder
-            folder = input("\nEnter folder to download (default: INBOX): ").strip()
-            if not folder:
-                folder = 'INBOX'
-            
-            # Validate folder exists
-            if available_folders and folder not in available_folders:
-                print(f"\nWarning: '{folder}' not found in available folders.")
-                print("Available folders are:")
-                for f in available_folders:
-                    print(f"  - {f}")
+        # Main download loop - allows multiple folder downloads
+        while True:
+            try:
+                # Check for existing progress
+                resume_mode, processed_ids = downloader.check_resume_option()
                 
-                confirm_folder = input(f"Still try to download from '{folder}'? (y/N): ").strip().lower()
-                if confirm_folder not in ['y', 'yes']:
-                    return
+                # Set resume state
+                downloader.resume_mode = resume_mode
+                downloader.processed_ids = processed_ids
+                
+                if resume_mode:
+                    # Load progress to get the folder
+                    progress = downloader.load_progress()
+                    if progress:
+                        folder = progress.get('folder', 'INBOX')
+                        print(f"Resuming download from folder: {folder}")
+                    else:
+                        print("Could not load progress details, please select folder manually.")
+                        resume_mode = False
+                        downloader.resume_mode = False
+                
+                if not resume_mode:
+                    # List available folders
+                    print("\nChecking available folders...")
+                    available_folders = downloader.list_folders()
+                    
+                    # Choose folder
+                    print("\nEnter folder to download:")
+                    print("- Type folder name (default: INBOX)")
+                    print("- Type 'quit' or 'exit' to stop")
+                    folder = input("\nFolder name: ").strip()
+                    
+                    # Check for exit commands
+                    if folder.lower() in ['quit', 'exit', 'q']:
+                        print("Exiting downloader...")
+                        break
+                    
+                    if not folder:
+                        folder = 'INBOX'
+                    
+                    # Validate folder exists
+                    if available_folders and folder not in available_folders:
+                        print(f"\nWarning: '{folder}' not found in available folders.")
+                        print("Available folders are:")
+                        for f in available_folders:
+                            print(f"  - {f}")
+                        
+                        confirm_folder = input(f"Still try to download from '{folder}'? (y/N): ").strip().lower()
+                        if confirm_folder not in ['y', 'yes']:
+                            continue  # Go back to folder selection
+                
+                # Start download with resume capability
+                print(f"\nStarting download from '{folder}'...")
+                if not resume_mode:
+                    confirm = input("Continue? (y/N): ").strip().lower()
+                    if confirm not in ['y', 'yes']:
+                        print("Download cancelled")
+                        continue  # Go back to folder selection
+                
+                # Start the download
+                download_success = downloader.download_all_emails(folder)
+                
+                if download_success:
+                    print(f"\n{'='*50}")
+                    print(f"Download from '{folder}' completed successfully!")
+                    print(f"{'='*50}")
+                    
+                    # Ask if user wants to download another folder
+                    print("\nWould you like to download another folder?")
+                    another = input("Download another folder? (y/N): ").strip().lower()
+                    if another not in ['y', 'yes']:
+                        print("All downloads completed. Exiting...")
+                        break
+                    else:
+                        # Reset state for next download
+                        downloader.resume_mode = False
+                        downloader.processed_ids = set()
+                        print("\n" + "="*50)
+                        continue
+                else:
+                    print(f"\nDownload from '{folder}' failed.")
+                    retry = input("Would you like to try another folder? (y/N): ").strip().lower()
+                    if retry not in ['y', 'yes']:
+                        break
+                    continue
+                    
+            except KeyboardInterrupt:
+                print("\nDownload interrupted by user")
+                print("Progress has been saved. You can resume later.")
+                
+                # Ask if user wants to continue with another folder
+                try:
+                    continue_choice = input("\nWould you like to download another folder? (y/N): ").strip().lower()
+                    if continue_choice not in ['y', 'yes']:
+                        break
+                    # Reset state for next download
+                    downloader.resume_mode = False
+                    downloader.processed_ids = set()
+                    continue
+                except KeyboardInterrupt:
+                    print("\nExiting...")
+                    break
         
-        # Start download with resume capability
-        print(f"\nStarting download from '{folder}'...")
-        if not resume_mode:
-            confirm = input("Continue? (y/N): ").strip().lower()
-            if confirm not in ['y', 'yes']:
-                print("Download cancelled")
-                return
-        
-        # Start the download
-        downloader.download_all_emails(folder)
-        
-    except KeyboardInterrupt:
-        print("\nDownload interrupted by user")
-        print("Progress has been saved. You can resume later.")
     except Exception as e:
         print(f"Unexpected error: {e}")
     finally:
         downloader.disconnect()
+        print("\nThank you for using Roundcube Email Downloader!")
 
 if __name__ == "__main__":
     main()
