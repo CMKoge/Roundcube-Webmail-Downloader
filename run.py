@@ -7,11 +7,11 @@ Downloads all emails as .eml files and extracts attachments to local storage
 import imaplib
 import email
 import os
-import sys
 import getpass
 from email.header import decode_header
 import re
 from datetime import datetime
+import json
 
 class RoundcubeDownloader:
     def __init__(self, server, port=993, use_ssl=True):
@@ -20,6 +20,9 @@ class RoundcubeDownloader:
         self.use_ssl = use_ssl
         self.imap = None
         self.base_dir = "downloaded_emails"
+        self.progress_file = "download_progress.json"
+        self.resume_mode = False
+        self.processed_ids = set()
         
     def connect(self, username, password):
         """Connect to IMAP server"""
@@ -73,6 +76,80 @@ class RoundcubeDownloader:
         os.makedirs(self.base_dir, exist_ok=True)
         os.makedirs(os.path.join(self.base_dir, "emails"), exist_ok=True)
         os.makedirs(os.path.join(self.base_dir, "attachments"), exist_ok=True)
+    
+    def save_progress(self, current_email_id, total_emails, folder, processed_ids):
+        """Save download progress to file"""
+        progress_data = {
+            'server': self.server,
+            'folder': folder,
+            'last_processed_id': current_email_id,
+            'total_emails': total_emails,
+            'processed_count': len(processed_ids),
+            'processed_ids': list(processed_ids),
+            'timestamp': datetime.now().isoformat(),
+            'base_dir': self.base_dir
+        }
+        
+        progress_path = os.path.join(self.base_dir, self.progress_file)
+        try:
+            with open(progress_path, 'w') as f:
+                json.dump(progress_data, f, indent=2)
+        except Exception as e:
+            print(f"Warning: Could not save progress: {e}")
+    
+    def load_progress(self):
+        """Load previous download progress"""
+        progress_path = os.path.join(self.base_dir, self.progress_file)
+        if not os.path.exists(progress_path):
+            return None
+        
+        try:
+            with open(progress_path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Warning: Could not load progress file: {e}")
+            return None
+    
+    def check_resume_option(self):
+        """Check if resume is possible and ask user"""
+        progress = self.load_progress()
+        if not progress:
+            return False, set()
+        
+        print(f"\nFound previous download session:")
+        print(f"  Server: {progress.get('server', 'Unknown')}")
+        print(f"  Folder: {progress.get('folder', 'Unknown')}")
+        print(f"  Processed: {progress.get('processed_count', 0)}/{progress.get('total_emails', 0)} emails")
+        print(f"  Last session: {progress.get('timestamp', 'Unknown')}")
+        
+        resume = input("\nWould you like to resume from where you left off? (y/N): ").strip().lower()
+        if resume in ['y', 'yes']:
+            return True, set(progress.get('processed_ids', []))
+        else:
+            # Clear old progress file
+            try:
+                os.remove(os.path.join(self.base_dir, self.progress_file))
+            except:
+                pass
+            return False, set()
+    
+    def is_email_downloaded(self, email_id):
+        """Check if email is already downloaded"""
+        # Check multiple possible filename formats
+        subject_patterns = [
+            f"{int(email_id):06d}_*.eml",
+            f"{email_id}_*.eml"
+        ]
+        
+        emails_dir = os.path.join(self.base_dir, "emails")
+        if not os.path.exists(emails_dir):
+            return False
+        
+        import glob
+        for pattern in subject_patterns:
+            if glob.glob(os.path.join(emails_dir, pattern)):
+                return True
+        return False
     
     def save_attachment(self, part, email_id, att_count):
         """Save email attachment"""
@@ -203,31 +280,65 @@ class RoundcubeDownloader:
             self.create_directories()
             self.create_import_instructions()
             
+            # Convert email_ids to integers for proper processing
+            email_ids = [int(eid.decode() if isinstance(eid, bytes) else eid) for eid in email_ids]
+            
+            # Filter out already processed emails if resuming
+            if self.resume_mode and self.processed_ids:
+                remaining_ids = [eid for eid in email_ids if eid not in self.processed_ids]
+                print(f"Resume mode: Skipping {len(self.processed_ids)} already processed emails")
+                print(f"Remaining to process: {len(remaining_ids)} emails")
+                email_ids = remaining_ids
+            
             # Process each email
             successful_downloads = 0
+            processed_count = len(self.processed_ids) if self.resume_mode else 0
+            
             for i, email_id in enumerate(email_ids, 1):
                 try:
+                    # Skip if already processed (additional safety check)
+                    if email_id in self.processed_ids:
+                        continue
+                    
                     # Fetch email
-                    status, msg_data = self.imap.fetch(email_id, '(RFC822)')
+                    status, msg_data = self.imap.fetch(str(email_id), '(RFC822)')
                     if status != 'OK':
                         print(f"Failed to fetch email {email_id}")
                         continue
                     
                     # Process email
-                    if self.process_email(int(email_id), msg_data[0][1]):
+                    if self.process_email(email_id, msg_data[0][1]):
                         successful_downloads += 1
+                        processed_count += 1
+                        self.processed_ids.add(email_id)
                     
-                    # Progress indicator
-                    if i % 10 == 0 or i == total_emails:
-                        print(f"Progress: {i}/{total_emails} emails processed")
+                    # Save progress every 10 emails
+                    if i % 10 == 0 or i == len(email_ids):
+                        self.save_progress(email_id, total_emails, folder, self.processed_ids)
+                        print(f"Progress: {processed_count}/{total_emails} emails processed ({i}/{len(email_ids)} in current batch)")
                         
                 except Exception as e:
                     print(f"Error processing email {email_id}: {e}")
                     continue
             
+            # Final progress save
+            if email_ids:  # Only save if we processed any emails
+                self.save_progress(email_ids[-1] if email_ids else 0, total_emails, folder, self.processed_ids)
+            
             print(f"\nDownload completed!")
-            print(f"Successfully downloaded: {successful_downloads}/{total_emails} emails")
+            print(f"Successfully downloaded: {successful_downloads} new emails")
+            print(f"Total processed: {processed_count}/{total_emails} emails")
             print(f"Files saved to: {os.path.abspath(self.base_dir)}")
+            
+            # Clean up progress file if download is complete
+            if processed_count >= total_emails:
+                try:
+                    progress_path = os.path.join(self.base_dir, self.progress_file)
+                    if os.path.exists(progress_path):
+                        os.remove(progress_path)
+                        print("Download complete - progress file cleaned up")
+                except:
+                    pass
             
             return True
             
@@ -263,19 +374,9 @@ class RoundcubeDownloader:
             print(f"Failed to list folders: {e}")
             return []
     
-    def disconnect(self):
-        """Close IMAP connection"""
-        if self.imap:
-            try:
-                self.imap.close()
-                self.imap.logout()
-                print("Disconnected from server")
-            except:
-                pass
-
-def create_import_instructions(self):
-    """Create instructions file for importing to Microsoft email clients"""
-    instructions = """
+    def create_import_instructions(self):
+        """Create instructions file for importing to Microsoft email clients"""
+        instructions = """
 # Email Import Instructions for Microsoft Email Clients
 
 ## Microsoft Outlook (Desktop)
@@ -322,11 +423,21 @@ def create_import_instructions(self):
 - Attachments: attachments/
 - This instructions file: IMPORT_INSTRUCTIONS.txt
 """
+        
+        instructions_path = os.path.join(self.base_dir, "IMPORT_INSTRUCTIONS.txt")
+        with open(instructions_path, 'w', encoding='utf-8') as f:
+            f.write(instructions.strip())
+        print(f"Import instructions saved to: {instructions_path}")
     
-    instructions_path = os.path.join(self.base_dir, "IMPORT_INSTRUCTIONS.txt")
-    with open(instructions_path, 'w', encoding='utf-8') as f:
-        f.write(instructions.strip())
-    print(f"Import instructions saved to: {instructions_path}")
+    def disconnect(self):
+        """Close IMAP connection"""
+        if self.imap:
+            try:
+                self.imap.close()
+                self.imap.logout()
+                print("Disconnected from server")
+            except:
+                pass
 
 def main():
     print("Roundcube Email Downloader - Microsoft Compatible")
@@ -362,39 +473,60 @@ def main():
         if not downloader.connect(username, password):
             return
         
-        # List available folders
-        print("\nChecking available folders...")
-        available_folders = downloader.list_folders()
+        # Check for existing progress before asking for folder
+        downloader.create_directories()  # Create directories first
+        resume_mode, processed_ids = downloader.check_resume_option()
         
-        # Choose folder
-        folder = input("\nEnter folder to download (default: INBOX): ").strip()
-        if not folder:
-            folder = 'INBOX'
+        # Set resume state
+        downloader.resume_mode = resume_mode
+        downloader.processed_ids = processed_ids
         
-        # Validate folder exists
-        if available_folders and folder not in available_folders:
-            print(f"\nWarning: '{folder}' not found in available folders.")
-            print("Available folders are:")
-            for f in available_folders:
-                print(f"  - {f}")
+        if resume_mode:
+            # Load progress to get the folder
+            progress = downloader.load_progress()
+            if progress:
+                folder = progress.get('folder', 'INBOX')
+                print(f"Resuming download from folder: {folder}")
+            else:
+                print("Could not load progress details, please select folder manually.")
+                resume_mode = False
+                downloader.resume_mode = False
+        
+        if not resume_mode:
+            # List available folders
+            print("\nChecking available folders...")
+            available_folders = downloader.list_folders()
             
-            confirm_folder = input(f"Still try to download from '{folder}'? (y/N): ").strip().lower()
-            if confirm_folder not in ['y', 'yes']:
+            # Choose folder
+            folder = input("\nEnter folder to download (default: INBOX): ").strip()
+            if not folder:
+                folder = 'INBOX'
+            
+            # Validate folder exists
+            if available_folders and folder not in available_folders:
+                print(f"\nWarning: '{folder}' not found in available folders.")
+                print("Available folders are:")
+                for f in available_folders:
+                    print(f"  - {f}")
+                
+                confirm_folder = input(f"Still try to download from '{folder}'? (y/N): ").strip().lower()
+                if confirm_folder not in ['y', 'yes']:
+                    return
+        
+        # Start download with resume capability
+        print(f"\nStarting download from '{folder}'...")
+        if not resume_mode:
+            confirm = input("Continue? (y/N): ").strip().lower()
+            if confirm not in ['y', 'yes']:
+                print("Download cancelled")
                 return
         
-        # Confirm download
-        print(f"\nReady to download all emails from '{folder}'")
-        confirm = input("Continue? (y/N): ").strip().lower()
-        if confirm not in ['y', 'yes']:
-            print("Download cancelled")
-            return
-        
-        # Start download
-        print(f"\nStarting download from '{folder}'...")
+        # Start the download
         downloader.download_all_emails(folder)
         
     except KeyboardInterrupt:
         print("\nDownload interrupted by user")
+        print("Progress has been saved. You can resume later.")
     except Exception as e:
         print(f"Unexpected error: {e}")
     finally:
