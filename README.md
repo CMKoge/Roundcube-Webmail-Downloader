@@ -35,21 +35,25 @@ This script uses only built-in Python libraries:
   
 2. Create a virtual environment
 
-   python3 -m venv .venv
+   ```bash
+    python3 -m venv .venv
 
 3. Activate the virtual environment
 
-   On macOS/Linux:
+  On macOS/Linux:
 
-     source venv/bin/activate
+      ```bash
+      source venv/bin/activate
 
-   On Windows:
-
+  On Windows:
+      
+      ```bash
       venv\Scripts\activate
 
 4. Run the script
 
+   ```bash
     python3 run.py
 
-5. You will be prompted to enter your email credentials.
+4. You will be prompted to enter your email credentials.
 
